@@ -403,8 +403,8 @@ if __name__ == '__main__':
     PRJ_PATH = Path('/root/code/img_retrieval_child_books')
     SAVE_PHOTO_PATH = PRJ_PATH / 'photos'
     MODEL_SAVE_PATH = PRJ_PATH / 'model_state'
-    RETRIEVAL_PATH = PRJ_PATH / 'rpc'
-    PICKLE_PATH = PRJ_PATH / 'pickles'
+    RPC_PATH = PRJ_PATH / 'rpc'
+    PICKLE_PATH = RPC_PATH / 'pickles'
     LOG_PATH = PRJ_PATH / 'log' / 'grpc_service.log'
     logger.add(LOG_PATH, rotation="1 day")
 

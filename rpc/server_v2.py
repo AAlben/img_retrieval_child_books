@@ -112,7 +112,7 @@ def reduction(features, pca, fited=False):
 
 class Greeter(image_classifier_pb2_grpc.GreeterServicer):
 
-    def __init__(self, transforms_, models, files_d, SAVE_PHOTO_PATH, logger, feat_act, ACTIVATION_KEYS, RETRIEVAL_PATH):
+    def __init__(self, transforms_, models, files_d, SAVE_PHOTO_PATH, logger, feat_act, ACTIVATION_KEYS, PICKLE_PATH):
         super(image_classifier_pb2_grpc.GreeterServicer, self).__init__()
         self.title_transform, self.retrieval_transform = transforms_
         self.title_model, self.retrieval_model = models
@@ -123,7 +123,7 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
         self.ACTIVATION_KEY_1, self.ACTIVATION_KEY_2 = ACTIVATION_KEYS
         self.resize_transform_1 = A.SmallestMaxSize(max_size=400)
         self.resize_transform_2 = nn.Upsample(size=(22, 22), mode='nearest')
-        self.RETRIEVAL_PATH = RETRIEVAL_PATH
+        self.PICKLE_PATH = PICKLE_PATH
 
         GAP, GMP, crow, gem, rmac, spoc = get_pooling_fn()
         self.pooling_fns = [GMP, gem]
@@ -369,19 +369,19 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
         return sorted_[0][0], var_d[sorted_[0][0]]['mean']
 
     def load_pickle(self, i=2):
-        with open(RETRIEVAL_PATH / f'pcas_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'pcas_{i}.pickle', 'rb') as f:
             self.pcas = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'gallery_Xs_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'gallery_Xs_{i}.pickle', 'rb') as f:
             self.gallery_Xs = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'book_names_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'book_names_{i}.pickle', 'rb') as f:
             self.book_names = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'page_nums_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'page_nums_{i}.pickle', 'rb') as f:
             self.page_nums = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'addition_Xs_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'addition_Xs_{i}.pickle', 'rb') as f:
             self.addition_Xs = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'addition_book_names_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'addition_book_names_{i}.pickle', 'rb') as f:
             self.addition_book_names = pickle.load(f)
-        with open(RETRIEVAL_PATH / f'addition_page_nums_{i}.pickle', 'rb') as f:
+        with open(PICKLE_PATH / f'addition_page_nums_{i}.pickle', 'rb') as f:
             self.addition_page_nums = pickle.load(f)
 
 
@@ -391,9 +391,9 @@ def get_activation(name):
     return hook
 
 
-def serve(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, RETRIEVAL_PATH):
+def serve(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, RETRIEVAL_PATH), server)
+    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH), server)
     server.add_insecure_port('[::]:5000')
     server.start()
     server.wait_for_termination()
@@ -404,7 +404,7 @@ if __name__ == '__main__':
     SAVE_PHOTO_PATH = PRJ_PATH / 'photos'
     MODEL_SAVE_PATH = PRJ_PATH / 'model_state'
     RPC_PATH = PRJ_PATH / 'rpc'
-    PICKLE_PATH = RPC_PATH / 'pickles'
+    PICKLE_PATH = PRJ_PATH / 'pickles'
     LOG_PATH = PRJ_PATH / 'log' / 'grpc_service.log'
     logger.add(LOG_PATH, rotation="1 day")
 

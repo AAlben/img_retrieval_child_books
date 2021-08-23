@@ -132,3 +132,4 @@ dmypy.json
 log/
 model_state/
 pickles/
+photos/

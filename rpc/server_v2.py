@@ -36,34 +36,14 @@ from utils.spoc import SPoC
 from utils.r_mac import RMAC
 
 
-def get_title_transforms(normalize_mean, normalize_std, resize=256):
+def get_query_transform(normalize_mean, normalize_std, resize=384):
     transform = A.Compose([
-        A.SmallestMaxSize(max_size=resize),
-        A.CenterCrop(height=resize - 32, width=resize - 32),
-        A.Normalize(mean=normalize_mean, std=normalize_std,),
-        ToTensorV2()
-    ])
-    return transform
-
-
-def get_retrieval_transforms(normalize_mean, normalize_std, resize=384):
-    transform = A.Compose([
-        A.SmallestMaxSize(max_size=400),
         A.CropAndPad(percent=(-0.14, 0, -0.3, 0)),
         A.Resize(resize - 32, resize - 32),
-        A.Normalize(mean=normalize_mean, std=normalize_std,),
+        A.Normalize(mean=normalize_mean, std=normalize_std),
         ToTensorV2()
     ])
     return transform
-
-
-def init_labels(LABELS_D_PATH):
-    labels_d, id_d = {}, {}
-    with open(LABELS_D_PATH, 'rb') as f:
-        labels_d = pickle.load(f)
-
-    id_d = dict(zip(labels_d.values(), labels_d.keys()))
-    return labels_d, id_d
 
 
 def get_pooling_fn():
@@ -112,22 +92,23 @@ def reduction(features, pca, fited=False):
 
 class Greeter(image_classifier_pb2_grpc.GreeterServicer):
 
-    def __init__(self, transforms_, models, files_d, SAVE_PHOTO_PATH, logger, feat_act, ACTIVATION_KEYS, PICKLE_PATH):
+    def __init__(self, query_transform, models, SAVE_PHOTO_PATH, logger, feat_act, ACTIVATION_KEYS, PICKLE_PATH, books_df):
         super(image_classifier_pb2_grpc.GreeterServicer, self).__init__()
-        self.title_transform, self.retrieval_transform = transforms_
+        self.query_transform = query_transform
         self.title_model, self.retrieval_model = models
-        self.files_d = files_d
         self.logger = logger
         self.SAVE_PHOTO_PATH = SAVE_PHOTO_PATH
         self.feat_act = feat_act
         self.ACTIVATION_KEY_1, self.ACTIVATION_KEY_2 = ACTIVATION_KEYS
-        self.resize_transform_1 = A.SmallestMaxSize(max_size=400)
-        self.resize_transform_2 = nn.Upsample(size=(22, 22), mode='nearest')
+        self.resize_t = A.SmallestMaxSize(max_size=400)
+        self.upsample = nn.Upsample(size=(22, 22), mode='nearest')
         self.PICKLE_PATH = PICKLE_PATH
+        self.PAGE_FEATURE_PATH = PICKLE_PATH / 'page_features'
 
         GAP, GMP, crow, gem, rmac, spoc = get_pooling_fn()
-        self.pooling_fns = [GMP, gem]
-        self.pooling_keys = [None, None]
+        self.title_pooling_fns, self.title_pooling_keys = [rmac], ['_RMAC']
+        self.page_pooling_fns, self.page_pooling_keys = [GMP], [None]
+        self.books_df = books_df
 
         self.load_pickle()
 
@@ -147,22 +128,26 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
             img_np = np.frombuffer(decoded, dtype=np.uint8)
             img_np = cv2.imdecode(img_np, flags=1)
 
-            resize_img = self.resize_transform_1(image=img_np)['image']
+            resize_img = self.resize_t(image=img_np)['image']
             receive_time = datetime.now().strftime('%Y-%m-%d_%H:%M:%S:%f')
             cv2.imwrite(str(SAVE_PHOTO_PATH / 'title' / f'{receive_time}.jpg'), resize_img)
 
             with torch.no_grad():
-                image = self.title_transform(image=img_np)['image']
+                image = self.query_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.title_model(image)
-                predict = torch.argmax(output, 1)
-                index = predict.cpu().numpy().item()
-
-            parts = self.files_d[index].split('/')
-            result['code'] = 1
-            result['book_name'] = parts[0]
-            result['page_num'] = 0
-            logger.info(f'img_shape = {img_np.shape}; book_name = {parts[0]}; page_num = {result["page_num"]}; file = {receive_time}.jpg')
+                feature = torch.cat((self.upsample(self.feat_act[self.ACTIVATION_KEY_1]), self.feat_act[self.ACTIVATION_KEY_2]),
+                                    dim=1)
+                dist_d = {}
+                dist_d = self.search_fn(feature,
+                                        self.title_pcas[0], self.title_pooling_fns[0], self.title_pooling_keys[0], self.title_gallery_Xs[0], self.title_book_names,
+                                        dist_d)
+            sorted_ = sorted(dist_d.items(), key=lambda x: x[1]['dist'])
+            if sorted_[0][1] < 1.5:
+                result['code'] = 1
+                result['book_name'] = sorted_[0][0]
+                result['page_num'] = 0
+            logger.info(f'img_shape = {img_np.shape}; book_name = {sorted_[0][0]}; dist = {sorted_[0][1]}; file = {receive_time}.jpg')
         except Exception as e:
             logger.info(f'exception_type = {type(e)}; error_msg = {traceback.format_exc()}')
             result['message'] = str(type(e))
@@ -182,36 +167,41 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
                   'book_name': request.book_name,
                   'page_num': None,
                   'is_last_page': None,
-                  'next_page_num': -1}
+                  'executed_time': None,
+                  'user_id': request.user_id}
 
         logger.info('receive search photo')
 
         try:
-            where = np.where(self.book_names == request.book_name)
-            page_nums = self.page_nums[where]
             buffer = request.content
             decoded = base64.b64decode(buffer)
             img_np = np.frombuffer(decoded, dtype=np.uint8)
             img_np = cv2.imdecode(img_np, flags=1)
 
-            resize_img = self.resize_transform_1(image=img_np)['image']
+            resize_img = self.resize_t(image=img_np)['image']
             receive_time = datetime.now().strftime('%Y-%m-%d_%H:%M:%S:%f')
             cv2.imwrite(str(SAVE_PHOTO_PATH / 'retrieval' / f'{receive_time}.jpg'), resize_img)
 
+            row = self.books_df[self.books_df.book_name == request.book_name]
+            if not row.size:
+                result['message'] = 'unknown book name'
+                return image_classifier_pb2.ExecuteReply(code=result['code'],
+                                                         message=result['message'],
+                                                         book_name=result['book_name'],
+                                                         page_num=result['page_num'],
+                                                         is_last_page=result['is_last_page'],
+                                                         executed_time=result['executed_time'],
+                                                         user_id=result['user_id'])
+
+            gallery_Xs, page_nums = self.load_page_pickle(request.book_name)
             with torch.no_grad():
-                image = self.retrieval_transform(image=img_np)['image']
+                image = self.query_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.retrieval_model(image)
-
-                features_7_7 = self.feat_act[self.ACTIVATION_KEY_1]
-                features_7_7 = self.resize_transform_2(features_7_7)
-                features = torch.cat((features_7_7, self.feat_act[ACTIVATION_KEY_2]), 1)
-
-                where_addition = np.where(self.addition_book_names == request.book_name)
-                where_pages, next_page, last_page = self.gallery_limit(page_nums, request.previous_page_num)
-                result['next_page_num'] = int(next_page.split('.')[0])
-
-                predict, dist = self.loop_search(where, where_pages, where_addition, features, page_nums[where_pages])
+                feature = torch.cat((self.upsample(self.feat_act[self.ACTIVATION_KEY_1]), self.feat_act[self.ACTIVATION_KEY_2]),
+                                    dim=1)
+                where, next_page, last_page = self.gallery_limit(page_nums, request.previous_page_num)
+                predict, dist = self.loop_search(where, feature, gallery_Xs, page_nums[where])
 
             is_last_page = predict == last_page
             if dist >= 1.5:
@@ -228,13 +218,13 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
             result['message'] = str(type(e))
             result['page_num'] = -1
 
-        return image_classifier_pb2.ExecuteReply(book_name=result['book_name'],
-                                                 page_num=result['page_num'],
-                                                 code=result['code'],
+        return image_classifier_pb2.ExecuteReply(code=result['code'],
                                                  message=result['message'],
+                                                 book_name=result['book_name'],
+                                                 page_num=result['page_num'],
+                                                 is_last_page=result['is_last_page'],
                                                  executed_time=receive_time,
-                                                 user_id=request.user_id,
-                                                 is_last_page=result['is_last_page'])
+                                                 user_id=request.user_id)
 
     def gallery_limit(self, page_nums, previous_page_num):
         unique_page = set(page_nums)
@@ -254,11 +244,11 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
         last_page = f'{unique_pages[-1]}.jpg'
 
         if page_index <= 2:
-            gallery_pages = unique_pages[:5]
+            gallery_pages = unique_pages[: 5]
         elif page_index >= len(unique_pages) - 3:
             gallery_pages = unique_pages[-5:]
         else:
-            gallery_pages = unique_pages[page_index - 2:page_index + 3]
+            gallery_pages = unique_pages[page_index - 2: page_index + 3]
 
         l = []
         for galley_page in gallery_pages:
@@ -268,24 +258,11 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
 
         return where_pages, next_page, last_page
 
-    def loop_search(self, where, where_pages, where_addition, query_features, page_nums):
+    def loop_search(self, where, feature, gallery_Xs, page_nums):
         dist_d = {0: {}, 1: {}, 2: {}}
-        addition_d = {}
-        for transform_gallery_Xs, addition_X, pca, pooling_fn, pooling_key in zip(self.gallery_Xs, self.addition_Xs, self.pcas, self.pooling_fns, self.pooling_keys):
-            if where_addition[0].size > 0:
-                addition_d = self.search_fn(query_features, pca, pooling_fn, pooling_key, addition_X[where_addition], self.addition_page_nums[where_addition], addition_d)
+        for transform_gallery_Xs, pooling_fn, pooling_key in zip(gallery_Xs, self.page_pooling_fns, self.page_pooling_keys):
             for i, transform_gallery_X in enumerate(transform_gallery_Xs):
-                dist_d[i] = self.search_fn(query_features, pca, pooling_fn, pooling_key, transform_gallery_X[where][where_pages], page_nums, dist_d[i])
-
-        if where_addition[0].size > 0:
-            sorted_0 = sorted(addition_d.items(), key=lambda x: np.mean(x[1]['dist']))
-            dist_0 = [(item[0], np.min(item[1]['dist']), np.mean(item[1]['dist']), np.std(item[1]['dist']), len(item[1]['dist'])) for item in sorted_0]
-            predict_0 = sorted_0[0][0]
-            mean_dist = dist_0[0][1]
-            if mean_dist < 0.5:
-                predict = predict_0
-                dist = mean_dist
-                return predict, dist
+                dist_d[i] = self.search_fn(feature, None, pooling_fn, pooling_key, transform_gallery_X[where], page_nums, dist_d[i])
 
         sorted_1 = sorted(dist_d[0].items(), key=lambda x: np.mean(x[1]['dist']))
         sorted_2 = sorted(dist_d[1].items(), key=lambda x: np.mean(x[1]['dist']))
@@ -307,8 +284,9 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
         global_features = global_features.cpu().numpy()
         global_features = np.nan_to_num(global_features)
         X = normalize(global_features, norm='l2')
-        X = pca.transform(X)
-        X = normalize(X, norm='l2')
+        if pca:
+            X = pca.transform(X)
+            X = normalize(X, norm='l2')
         query_X = X
 
         index = faiss.IndexFlatL2(gallery_X.shape[1])
@@ -368,21 +346,21 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
 
         return sorted_[0][0], var_d[sorted_[0][0]]['mean']
 
-    def load_pickle(self, i=2):
-        with open(PICKLE_PATH / f'pcas_{i}.pickle', 'rb') as f:
-            self.pcas = pickle.load(f)
-        with open(PICKLE_PATH / f'gallery_Xs_{i}.pickle', 'rb') as f:
-            self.gallery_Xs = pickle.load(f)
-        with open(PICKLE_PATH / f'book_names_{i}.pickle', 'rb') as f:
-            self.book_names = pickle.load(f)
-        with open(PICKLE_PATH / f'page_nums_{i}.pickle', 'rb') as f:
-            self.page_nums = pickle.load(f)
-        with open(PICKLE_PATH / f'addition_Xs_{i}.pickle', 'rb') as f:
-            self.addition_Xs = pickle.load(f)
-        with open(PICKLE_PATH / f'addition_book_names_{i}.pickle', 'rb') as f:
-            self.addition_book_names = pickle.load(f)
-        with open(PICKLE_PATH / f'addition_page_nums_{i}.pickle', 'rb') as f:
-            self.addition_page_nums = pickle.load(f)
+    def load_pickle(self, i=5000):
+        # title
+        with open(self.PICKLE_PATH / f'pcas_{i}.pickle', 'rb') as f:
+            self.title_pcas = pickle.load(f)
+        with open(self.PICKLE_PATH / f'book_names_{i}.pickle', 'rb') as f:
+            self.title_book_names = pickle.load(f)
+        with open(self.PICKLE_PATH / f'title_{i}.pickle', 'rb') as f:
+            self.title_gallery_Xs = pickle.load(f)
+
+    def load_page_pickle(self, book_name):
+        with open(self.PAGE_FEATURE_PATH / f'{book_name}_page_nums.pickle', 'rb') as f:
+            page_nums = pickle.load(f)
+        with open(self.PAGE_FEATURE_PATH / f'{book_name}.pickle', 'rb') as f:
+            gallery_Xs = pickle.load(f)
+        return gallery_Xs, page_nums
 
 
 def get_activation(name):
@@ -391,9 +369,9 @@ def get_activation(name):
     return hook
 
 
-def serve(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH):
+def serve(query_transform, models, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH, books_df):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(transforms_, models, files_d, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH), server)
+    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(query_transform, models, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH), server, books_df)
     server.add_insecure_port('[::]:5000')
     server.start()
     server.wait_for_termination()
@@ -408,33 +386,26 @@ if __name__ == '__main__':
     LOG_PATH = PRJ_PATH / 'log' / 'grpc_service.log'
     logger.add(LOG_PATH, rotation="1 day")
 
-    LABELS_D_TITLE_PATH = PICKLE_PATH / 'labels_d_v1.pickle'
-    LABELS_D_RETRIEVAL_PATH = PICKLE_PATH / 'labels_d_all.pickle'
-
-    TITLE_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_b0_0805_label_smoothing_94.pth'
-    i = 2
-    RETRIEVAL_MODEL_STATE_PATH = MODEL_SAVE_PATH / f'efficientnet_v2_s_0817_3_retrieval_centerloss_{i}.pth'
+    TITLE_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_m_0828_title_centerloss_6.pth'
+    RETRIEVAL_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_s_0826_retrieval_centerloss_5.pth'
 
     normalize_mean, normalize_std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-    title_transform = get_title_transforms(normalize_mean, normalize_std)
-    retrieval_transform = get_retrieval_transforms(normalize_mean, normalize_std)
+    query_transform = get_query_transform(normalize_mean, normalize_std)
 
-    labels_d_title, files_d_title = init_labels(LABELS_D_TITLE_PATH)
-    NUM_TITLES = len(labels_d_title.keys())
-
-    labels_d_retrieval, files_d_retrieval = init_labels(LABELS_D_RETRIEVAL_PATH)
-    NUM_PAGES = len(labels_d_retrieval.keys())
+    books_df = pd.read_csv(PICKLE_PATH / 'can_use_books.csv')
+    NUM_TITLES = books_df.shape[0]
+    pages_df = pd.read_csv(PICKLE_PATH / 'train_per_4.csv')
+    NUM_PAGES = pages_df.shape[0]
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    title_model = timm.create_model('tf_efficientnetv2_b0')
+    title_model = timm.create_model('tf_efficientnetv2_m_in21k')
     classifier_in_features = title_model.classifier.in_features
     title_model.classifier = torch.nn.Linear(in_features=classifier_in_features, out_features=NUM_TITLES, bias=True)
     title_model.load_state_dict(torch.load(str(TITLE_MODEL_STATE_PATH)))
     title_model.to(device)
     title_model.eval()
 
-    retrieval_model = timm.create_model('tf_efficientnetv2_s')
+    retrieval_model = timm.create_model('tf_efficientnetv2_m_in21k')
     classifier_in_features = retrieval_model.classifier.in_features
     retrieval_model.classifier = torch.nn.Linear(in_features=classifier_in_features, out_features=NUM_PAGES, bias=True)
     retrieval_model.load_state_dict(torch.load(str(RETRIEVAL_MODEL_STATE_PATH)))
@@ -442,8 +413,8 @@ if __name__ == '__main__':
     retrieval_model.eval()
 
     feat_act = {}
-    ACTIVATION_KEY_1, ACTIVATION_KEY_2 = 'act2', 'b_4_8_act2'
+    ACTIVATION_KEY_1, ACTIVATION_KEY_2 = 'act2', 'b_4_13_act2'
     retrieval_model.act2.register_forward_hook(get_activation(ACTIVATION_KEY_1))
-    retrieval_model.blocks[4][8].act2.register_forward_hook(get_activation(ACTIVATION_KEY_2))
+    retrieval_model.blocks[4][13].act2.register_forward_hook(get_activation(ACTIVATION_KEY_2))
 
-    serve([title_transform, retrieval_transform], [title_model, retrieval_model], files_d_title, SAVE_PHOTO_PATH, logger, feat_act, [ACTIVATION_KEY_1, ACTIVATION_KEY_2], PICKLE_PATH)
+    serve(query_transform, [title_model, retrieval_model], SAVE_PHOTO_PATH, logger, feat_act, [ACTIVATION_KEY_1, ACTIVATION_KEY_2], PICKLE_PATH, books_df)

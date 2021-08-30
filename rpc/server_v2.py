@@ -136,18 +136,18 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
                 image = self.query_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.title_model(image)
-                feature = torch.cat((self.upsample(self.feat_act[self.ACTIVATION_KEY_1]), self.feat_act[self.ACTIVATION_KEY_2]),
+                feature = torch.cat((self.upsample(self.feat_act[f't_{self.ACTIVATION_KEY_1}']), self.feat_act[f't_{self.ACTIVATION_KEY_2}']),
                                     dim=1)
                 dist_d = {}
                 dist_d = self.search_fn(feature,
                                         self.title_pcas[0], self.title_pooling_fns[0], self.title_pooling_keys[0], self.title_gallery_Xs[0], self.title_book_names,
                                         dist_d)
-            sorted_ = sorted(dist_d.items(), key=lambda x: x[1]['dist'])
-            if sorted_[0][1] < 1.5:
+            sorted_ = sorted(dist_d.items(), key=lambda x: np.mean(x[1]['dist']))
+            if np.mean(sorted_[0][1]['dist']) < 1.5:
                 result['code'] = 1
                 result['book_name'] = sorted_[0][0]
                 result['page_num'] = 0
-            logger.info(f'img_shape = {img_np.shape}; book_name = {sorted_[0][0]}; dist = {sorted_[0][1]}; file = {receive_time}.jpg')
+            logger.info(f'img_shape = {img_np.shape}; book_name = {sorted_[0][0]}; dist = {sorted_[0][1]["dist"]}; file = {receive_time}.jpg')
         except Exception as e:
             logger.info(f'exception_type = {type(e)}; error_msg = {traceback.format_exc()}')
             result['message'] = str(type(e))
@@ -198,7 +198,7 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
                 image = self.query_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.retrieval_model(image)
-                feature = torch.cat((self.upsample(self.feat_act[self.ACTIVATION_KEY_1]), self.feat_act[self.ACTIVATION_KEY_2]),
+                feature = torch.cat((self.upsample(self.feat_act[f'r_{self.ACTIVATION_KEY_1}']), self.feat_act[f'r_{self.ACTIVATION_KEY_2}']),
                                     dim=1)
                 where, next_page, last_page = self.gallery_limit(page_nums, request.previous_page_num)
                 predict, dist = self.loop_search(where, feature, gallery_Xs, page_nums[where])
@@ -262,6 +262,8 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
         dist_d = {0: {}, 1: {}, 2: {}}
         for transform_gallery_Xs, pooling_fn, pooling_key in zip(gallery_Xs, self.page_pooling_fns, self.page_pooling_keys):
             for i, transform_gallery_X in enumerate(transform_gallery_Xs):
+                transform_gallery_X = np.nan_to_num(transform_gallery_X)
+                transform_gallery_X = normalize(transform_gallery_X, norm='l2')
                 dist_d[i] = self.search_fn(feature, None, pooling_fn, pooling_key, transform_gallery_X[where], page_nums, dist_d[i])
 
         sorted_1 = sorted(dist_d[0].items(), key=lambda x: np.mean(x[1]['dist']))
@@ -371,7 +373,7 @@ def get_activation(name):
 
 def serve(query_transform, models, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH, books_df):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(query_transform, models, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH), server, books_df)
+    image_classifier_pb2_grpc.add_GreeterServicer_to_server(Greeter(query_transform, models, SAVE_PHOTO_PATH, looger, feat_act, ACTIVATION_KEYS, PICKLE_PATH, books_df), server)
     server.add_insecure_port('[::]:5000')
     server.start()
     server.wait_for_termination()
@@ -414,7 +416,9 @@ if __name__ == '__main__':
 
     feat_act = {}
     ACTIVATION_KEY_1, ACTIVATION_KEY_2 = 'act2', 'b_4_13_act2'
-    retrieval_model.act2.register_forward_hook(get_activation(ACTIVATION_KEY_1))
-    retrieval_model.blocks[4][13].act2.register_forward_hook(get_activation(ACTIVATION_KEY_2))
+    title_model.act2.register_forward_hook(get_activation(f't_{ACTIVATION_KEY_1}'))
+    title_model.blocks[4][13].act2.register_forward_hook(get_activation(f't_{ACTIVATION_KEY_2}'))
+    retrieval_model.act2.register_forward_hook(get_activation(f'r_{ACTIVATION_KEY_1}'))
+    retrieval_model.blocks[4][13].act2.register_forward_hook(get_activation(f'r_{ACTIVATION_KEY_2}'))
 
     serve(query_transform, [title_model, retrieval_model], SAVE_PHOTO_PATH, logger, feat_act, [ACTIVATION_KEY_1, ACTIVATION_KEY_2], PICKLE_PATH, books_df)

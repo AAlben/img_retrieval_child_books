@@ -136,18 +136,14 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
                 image = self.query_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.title_model(image)
-                feature = torch.cat((self.upsample(self.feat_act[f't_{self.ACTIVATION_KEY_1}']), self.feat_act[f't_{self.ACTIVATION_KEY_2}']),
-                                    dim=1)
-                dist_d = {}
-                dist_d = self.search_fn(feature,
-                                        self.title_pcas[0], self.title_pooling_fns[0], self.title_pooling_keys[0], self.title_gallery_Xs[0], self.title_book_names,
-                                        dist_d)
-            sorted_ = sorted(dist_d.items(), key=lambda x: np.mean(x[1]['dist']))
-            if np.mean(sorted_[0][1]['dist']) < 1.5:
-                result['code'] = 1
-                result['book_name'] = sorted_[0][0]
-                result['page_num'] = 0
-            logger.info(f'img_shape = {img_np.shape}; book_name = {sorted_[0][0]}; dist = {sorted_[0][1]["dist"]}; file = {receive_time}.jpg')
+                predict = torch.argmax(output, 1)
+                predict = predict.cpu().item()
+
+            row = self.books_df.loc[predict]
+            result['code'] = 1
+            result['book_name'] = row.book_name
+            result['page_num'] = 0
+            logger.info(f'img_shape = {img_np.shape}; book_name = {row.book_name}; file = {receive_time}.jpg')
         except Exception as e:
             logger.info(f'exception_type = {type(e)}; error_msg = {traceback.format_exc()}')
             result['message'] = str(type(e))
@@ -388,7 +384,7 @@ if __name__ == '__main__':
     LOG_PATH = PRJ_PATH / 'log' / 'grpc_service.log'
     logger.add(LOG_PATH, rotation="1 day")
 
-    TITLE_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_m_0828_title_centerloss_6.pth'
+    TITLE_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_m_0901_1_title_label_smoothing_9.pth'
     RETRIEVAL_MODEL_STATE_PATH = MODEL_SAVE_PATH / 'efficientnet_v2_s_0826_retrieval_centerloss_5.pth'
 
     normalize_mean, normalize_std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]

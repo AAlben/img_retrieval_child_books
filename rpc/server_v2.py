@@ -46,6 +46,16 @@ def get_query_transform(normalize_mean, normalize_std, resize=384):
     return transform
 
 
+def get_title_transform(normalize_mean, normalize_std, resize=384):
+    transform = A.Compose([
+        A.SmallestMaxSize(max_size=resize),
+        A.Resize(resize - 32, resize - 32),
+        A.Normalize(mean=normalize_mean, std=normalize_std,),
+        ToTensorV2()
+    ])
+    return transform
+
+
 def get_pooling_fn():
     GAP = lambda features: features.mean(dim=3).mean(dim=2)
     GMP = lambda features: (features.max(dim=3)[0]).max(dim=2)[0]
@@ -94,7 +104,7 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
 
     def __init__(self, query_transform, models, SAVE_PHOTO_PATH, logger, feat_act, ACTIVATION_KEYS, PICKLE_PATH, books_df):
         super(image_classifier_pb2_grpc.GreeterServicer, self).__init__()
-        self.query_transform = query_transform
+        self.query_transform, self.title_transform = query_transform
         self.title_model, self.retrieval_model = models
         self.logger = logger
         self.SAVE_PHOTO_PATH = SAVE_PHOTO_PATH
@@ -133,7 +143,7 @@ class Greeter(image_classifier_pb2_grpc.GreeterServicer):
             cv2.imwrite(str(SAVE_PHOTO_PATH / 'title' / f'{receive_time}.jpg'), resize_img)
 
             with torch.no_grad():
-                image = self.query_transform(image=img_np)['image']
+                image = self.title_transform(image=img_np)['image']
                 image = image.to(device)[None]
                 output = self.title_model(image)
                 predict = torch.argmax(output, 1)
@@ -389,6 +399,7 @@ if __name__ == '__main__':
 
     normalize_mean, normalize_std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     query_transform = get_query_transform(normalize_mean, normalize_std)
+    title_transform = get_title_transform(normalize_mean, normalize_std)
 
     books_df = pd.read_csv(PICKLE_PATH / 'can_use_books.csv')
     NUM_TITLES = books_df.shape[0]
@@ -417,4 +428,4 @@ if __name__ == '__main__':
     retrieval_model.act2.register_forward_hook(get_activation(f'r_{ACTIVATION_KEY_1}'))
     retrieval_model.blocks[4][13].act2.register_forward_hook(get_activation(f'r_{ACTIVATION_KEY_2}'))
 
-    serve(query_transform, [title_model, retrieval_model], SAVE_PHOTO_PATH, logger, feat_act, [ACTIVATION_KEY_1, ACTIVATION_KEY_2], PICKLE_PATH, books_df)
+    serve((query_transform, title_transform), [title_model, retrieval_model], SAVE_PHOTO_PATH, logger, feat_act, [ACTIVATION_KEY_1, ACTIVATION_KEY_2], PICKLE_PATH, books_df)
